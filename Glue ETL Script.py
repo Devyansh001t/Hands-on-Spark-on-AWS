@@ -43,9 +43,7 @@ df_transformed = df_transformed.withColumn("review_text",
 # 4. Convert product_id to uppercase for consistency
 df_transformed = df_transformed.withColumn("product_id_upper", upper(col("product_id")))
 
-
 # --- Write the full transformed data to S3 (Good practice) ---
-# This saves the clean, complete dataset to the 'processed-data' folder
 glue_processed_frame = DynamicFrame.fromDF(df_transformed, glueContext, "transformed_df")
 glueContext.write_dynamic_frame.from_options(
     frame=glue_processed_frame,
@@ -55,11 +53,10 @@ glueContext.write_dynamic_frame.from_options(
 )
 
 # --- Run Spark SQL Query within the Job ---
-
 # 1. Create a temporary view in Spark's memory
 df_transformed.createOrReplaceTempView("product_reviews")
 
-# 2. Run your SQL query
+# Query 1: Average rating per product (provided)
 df_analytics_result = spark.sql("""
     SELECT 
         product_id_upper, 
@@ -70,22 +67,75 @@ df_analytics_result = spark.sql("""
     ORDER BY average_rating DESC
 """)
 
-# 3. Write the query's result DataFrame to your 'Athena Results' path
 print(f"Writing analytics results to {s3_analytics_path}...")
-
-# repartition(1) writes the result as a single file
 analytics_result_frame = DynamicFrame.fromDF(df_analytics_result.repartition(1), glueContext, "analytics_df")
 glueContext.write_dynamic_frame.from_options(
     frame=analytics_result_frame,
     connection_type="s3",
-    connection_options={"path": s3_analytics_path},
+    connection_options={"path": s3_analytics_path + "avg_rating_per_product/"},
     format="csv"
 )
 
-# Write the spark queries for following:
-# 2. Date wise review count: his query calculates the total number of reviews submitted per day.
-# 3. Top 5 Most Active Customers: This query identifies your "power users" by finding the customers who have submitted the most reviews.
-# 4. Overall Rating Distribution: This query shows the count for each star rating (1-star, 2-star, etc.)
+# --- Query 2: Date-wise Review Count ---
+# Calculates the total number of reviews submitted per day
+df_date_review_count = spark.sql("""
+    SELECT
+        review_date,
+        COUNT(*) as review_count
+    FROM product_reviews
+    GROUP BY review_date
+    ORDER BY review_date ASC
+""")
 
+print("Writing date-wise review counts...")
+date_review_frame = DynamicFrame.fromDF(df_date_review_count.repartition(1), glueContext, "date_review_df")
+glueContext.write_dynamic_frame.from_options(
+    frame=date_review_frame,
+    connection_type="s3",
+    connection_options={"path": s3_analytics_path + "daily_review_counts/"},
+    format="csv"
+)
+
+# --- Query 3: Top 5 Most Active Customers ---
+# Identifies power users by finding customers who submitted the most reviews
+df_top_customers = spark.sql("""
+    SELECT
+        customer_id,
+        COUNT(*) as total_reviews
+    FROM product_reviews
+    GROUP BY customer_id
+    ORDER BY total_reviews DESC
+    LIMIT 5
+""")
+
+print("Writing top 5 most active customers...")
+top_customers_frame = DynamicFrame.fromDF(df_top_customers.repartition(1), glueContext, "top_customers_df")
+glueContext.write_dynamic_frame.from_options(
+    frame=top_customers_frame,
+    connection_type="s3",
+    connection_options={"path": s3_analytics_path + "top_5_customers/"},
+    format="csv"
+)
+
+# --- Query 4: Overall Rating Distribution ---
+# Shows the count for each star rating (1-star, 2-star, etc.)
+df_rating_distribution = spark.sql("""
+    SELECT
+        rating,
+        COUNT(*) as review_count
+    FROM product_reviews
+    GROUP BY rating
+    ORDER BY rating ASC
+""")
+
+print("Writing overall rating distribution...")
+rating_dist_frame = DynamicFrame.fromDF(df_rating_distribution.repartition(1), glueContext, "rating_dist_df")
+glueContext.write_dynamic_frame.from_options(
+    frame=rating_dist_frame,
+    connection_type="s3",
+    connection_options={"path": s3_analytics_path + "rating_distribution/"},
+    format="csv"
+)
 
 job.commit()
+print("Glue job completed successfully.")
